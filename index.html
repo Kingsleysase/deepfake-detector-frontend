@@ -6,446 +6,534 @@
 <title>Deepfake Video Detection System</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
-<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700&family=Outfit:wght@300;400;500;600&display=swap" rel="stylesheet"/>
-
-<!-- Official Gradio JS client — handles CORS, file upload, prediction correctly -->
-<script type="module">
-import { Client } from "https://cdn.jsdelivr.net/npm/@gradio/client/dist/index.min.js";
-
-const SPACE = "workklic/deepfake-video-detector";
-const THR   = 0.05;
-let file    = null;
-let gradioClient = null;
-
-const el = id => document.getElementById(id);
-
-// ── Connect to Space on page load ────────────────────────────────
-async function connectToSpace() {
-  try {
-    showToast("Connecting to AI model...", "info");
-    gradioClient = await Client.connect(SPACE);
-    hideToast();
-    console.log("Gradio client connected ✓");
-  } catch(e) {
-    showToast("AI model is starting up. Please wait a moment then try uploading a video.", "warning");
-    console.warn("Connect failed:", e);
-    // Retry connection after 20 seconds
-    setTimeout(connectToSpace, 20000);
-  }
-}
-
-connectToSpace();
-
-// ── File handling ────────────────────────────────────────────────
-function fmtSize(b){ return b < 1048576 ? (b/1024).toFixed(1)+' KB' : (b/1048576).toFixed(1)+' MB' }
-
-function pickFile(f){
-  if(!f || !f.type.startsWith('video/')){ showToast('Please select a valid video file (MP4, AVI, MOV).','error'); return; }
-  file = f;
-  el('chipName').textContent = f.name;
-  el('chipSize').textContent = fmtSize(f.size);
-  el('fileChip').classList.add('show');
-  el('analyseBtn').disabled = false;
-  reset();
-}
-
-el('fileInput').addEventListener('change', e => pickFile(e.target.files[0]));
-el('dropZone').addEventListener('dragover', e => { e.preventDefault(); el('dropZone').classList.add('over'); });
-el('dropZone').addEventListener('dragleave', () => el('dropZone').classList.remove('over'));
-el('dropZone').addEventListener('drop', e => {
-  e.preventDefault(); el('dropZone').classList.remove('over'); pickFile(e.dataTransfer.files[0]);
-});
-
-// ── UI helpers ───────────────────────────────────────────────────
-function reset(){
-  el('resultEmpty').classList.remove('gone');
-  el('resultBody').classList.remove('show');
-  el('scoreFill').style.width = '0%';
-}
-
-function showResult(prob, frames, ms, imgUrl){
-  const p = parseFloat(prob) || 0;
-  let cls, icon, title, desc;
-  if(p >= THR){
-    cls='fake'; icon='✕'; title='Deepfake Detected';
-    desc='This video shows signs of AI-generated manipulation.';
-  } else if(p < THR * 0.5){
-    cls='real'; icon='✓'; title='Authentic';
-    desc='This video appears to be genuine, unmanipulated content.';
-  } else {
-    cls='review'; icon='?'; title='Needs Review';
-    desc='Borderline result — secondary human review is recommended.';
-  }
-  el('verdictCard').className = `verdict-card ${cls}`;
-  el('verdictBadge').className = `verdict-badge ${cls}`;
-  el('verdictBadge').textContent = icon;
-  el('verdictTitle').className = `verdict-title ${cls}`;
-  el('verdictTitle').textContent = title;
-  el('verdictDesc').textContent = desc;
-  el('scoreVal').textContent = 'P(Fake): ' + p.toFixed(4);
-  const fill = el('scoreFill');
-  fill.className = `score-fill ${cls}`;
-  setTimeout(() => { fill.style.width = Math.min(p*100, 100) + '%'; }, 60);
-  el('ms1').textContent = p.toFixed(4);
-  el('ms2').textContent = frames || 10;
-  el('ms3').textContent = ms ? (ms/1000).toFixed(1)+'s' : '—';
-  if(imgUrl){ el('frameImg').src = imgUrl; el('framePrev').style.display = 'block'; }
-  else el('framePrev').style.display = 'none';
-  el('resultEmpty').classList.add('gone');
-  el('resultBody').classList.add('show');
-}
-
-let toastTimer = null;
-function showToast(msg, type='error'){
-  const t = el('toast');
-  t.textContent = msg;
-  t.className = `toast ${type} show`;
-  if(toastTimer) clearTimeout(toastTimer);
-  if(type !== 'info' && type !== 'warning'){
-    toastTimer = setTimeout(() => t.classList.remove('show'), 6000);
-  }
-}
-function hideToast(){
-  if(toastTimer) clearTimeout(toastTimer);
-  el('toast').classList.remove('show');
-}
-
-function setSpinMsg(msg){ el('btnSpinMsg').textContent = msg; }
-
-// ── Main analyse function using Gradio client ────────────────────
-el('analyseBtn').addEventListener('click', async () => {
-  if(!file) return;
-  const btn = el('analyseBtn');
-  btn.classList.add('loading'); btn.disabled = true; reset();
-  const t0 = Date.now();
-
-  try {
-    // If not connected yet, try connecting now
-    if(!gradioClient){
-      setSpinMsg('Connecting to AI model...');
-      try {
-        gradioClient = await Client.connect(SPACE);
-      } catch(e) {
-        throw new Error('Could not connect to the AI model. Please try again in 30 seconds.');
-      }
-    }
-
-    // Upload the video file using the Gradio client
-    setSpinMsg('Uploading video...');
-    const uploadedFile = await gradioClient.upload([file]);
-
-    // Run prediction
-    setSpinMsg('Analysing frames...');
-    const result = await gradioClient.predict("/predict", [uploadedFile[0]]);
-
-    const data    = result.data;
-    const resText = data[0] || '';
-    const probNum = parseFloat(data[1]) || 0;
-    const imgData = data[2];
-
-    let imgUrl = null;
-    if(imgData && imgData.url) {
-      imgUrl = imgData.url;
-    } else if(imgData && typeof imgData === 'string' && imgData.startsWith('http')) {
-      imgUrl = imgData;
-    }
-
-    showResult(probNum, 10, Date.now() - t0, imgUrl);
-    hideToast();
-
-  } catch(err) {
-    console.error(err);
-    const msg = err.message || '';
-
-    if(msg.includes('connect') || msg.includes('fetch') || msg.includes('network')){
-      // Connection issue — reset client and show helpful message
-      gradioClient = null;
-      showToast('Connection lost. The AI model may be restarting. Please wait 30 seconds and try again.', 'warning');
-      setTimeout(connectToSpace, 5000);
-    } else {
-      showToast(msg || 'Something went wrong. Please try again.', 'error');
-    }
-  } finally {
-    btn.classList.remove('loading'); btn.disabled = false;
-    setSpinMsg('Analysing video...');
-  }
-});
-</script>
-
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=Outfit:wght@300;400;500;600&display=swap" rel="stylesheet"/>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{
-  --bg:#060810;--bg2:#0b0f1a;--bg3:#0f1422;
-  --card:#111827;--card2:#151d2e;
-  --border:#1e2a40;--border2:#243047;
-  --text:#f0f2ff;--text2:#8892aa;--text3:#4a5568;
-  --accent:#3b82f6;--accent2:#60a5fa;
-  --accent-glow:rgba(59,130,246,0.15);
-  --real:#10b981;--real-bg:rgba(16,185,129,0.08);
-  --fake:#ef4444;--fake-bg:rgba(239,68,68,0.08);
-  --review:#f59e0b;--review-bg:rgba(245,158,11,0.08);
-  --sans:'Outfit',sans-serif;--display:'Syne',sans-serif;--r:16px;
+  --bg:#0d0f14;--surface:#141720;--surface2:#1a1e2a;--border:#252a38;
+  --accent:#6366f1;--accent2:#818cf8;--accent-glow:rgba(99,102,241,0.25);
+  --real:#10b981;--real-bg:rgba(16,185,129,0.1);
+  --fake:#ef4444;--fake-bg:rgba(239,68,68,0.1);
+  --review:#f59e0b;--review-bg:rgba(245,158,11,0.1);
+  --text:#e2e8f0;--muted:#64748b;--muted2:#94a3b8;--radius:14px;
 }
-html{scroll-behavior:smooth}
-body{background:var(--bg);color:var(--text);font-family:var(--sans);font-size:15px;line-height:1.6;min-height:100vh;-webkit-font-smoothing:antialiased;}
-body::before{content:'';position:fixed;inset:0;background-image:linear-gradient(rgba(59,130,246,0.03) 1px,transparent 1px),linear-gradient(90deg,rgba(59,130,246,0.03) 1px,transparent 1px);background-size:40px 40px;pointer-events:none;z-index:0;}
-nav{position:sticky;top:0;z-index:100;background:rgba(6,8,16,0.85);backdrop-filter:blur(16px);border-bottom:1px solid var(--border);padding:0 48px;height:60px;display:flex;align-items:center;justify-content:space-between;}
-.nav-brand{display:flex;align-items:center;gap:10px;font-family:var(--display);font-size:17px;font-weight:700;color:var(--text);text-decoration:none;letter-spacing:-0.01em;}
-.nav-brand-dot{width:28px;height:28px;border-radius:8px;background:linear-gradient(135deg,#3b82f6,#6366f1);display:flex;align-items:center;justify-content:center;flex-shrink:0;}
-.nav-brand-dot svg{width:14px;height:14px;color:#fff;fill:none;stroke:currentColor;stroke-width:2.5}
-.nav-badge{font-size:11px;font-family:var(--sans);font-weight:500;background:var(--accent-glow);border:1px solid rgba(59,130,246,0.25);color:var(--accent2);border-radius:20px;padding:3px 12px;letter-spacing:0.02em;}
-.hero{position:relative;z-index:1;max-width:1100px;margin:0 auto;padding:80px 48px 56px;text-align:center;}
-.hero-eyebrow{display:inline-flex;align-items:center;gap:8px;font-size:12px;letter-spacing:0.1em;text-transform:uppercase;color:var(--accent2);font-weight:500;background:var(--accent-glow);border:1px solid rgba(59,130,246,0.2);border-radius:20px;padding:6px 16px;margin-bottom:28px;}
-.hero-eyebrow span{width:6px;height:6px;border-radius:50%;background:var(--accent);box-shadow:0 0 6px var(--accent);animation:pulse 2s infinite;}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
-.hero h1{font-family:var(--display);font-size:clamp(36px,5vw,60px);font-weight:700;letter-spacing:-0.03em;line-height:1.1;color:var(--text);margin-bottom:20px;}
-.hero h1 .blue{background:linear-gradient(90deg,#60a5fa,#818cf8);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;}
-.hero p{font-size:17px;color:var(--text2);max-width:520px;margin:0 auto 48px;line-height:1.75;font-weight:300;}
-.stats-bar{position:relative;z-index:1;max-width:760px;margin:0 auto 56px;display:grid;grid-template-columns:repeat(4,1fr);background:var(--card);border:1px solid var(--border);border-radius:var(--r);overflow:hidden;}
-.stat-cell{padding:20px 24px;border-right:1px solid var(--border);text-align:center;position:relative;}
-.stat-cell:last-child{border-right:none}
-.stat-cell::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--accent),transparent);opacity:0;transition:opacity 0.3s;}
-.stat-cell:hover::before{opacity:1}
-.stat-num{font-family:var(--display);font-size:26px;font-weight:700;color:var(--text);letter-spacing:-0.02em;margin-bottom:4px;}
-.stat-num .pct{font-size:16px;font-weight:500;color:var(--accent2)}
-.stat-lbl{font-size:11px;color:var(--text3);letter-spacing:0.06em;text-transform:uppercase;font-weight:500}
-.section{position:relative;z-index:1;max-width:1100px;margin:0 auto;padding:0 48px 80px;}
-.two-col{display:grid;grid-template-columns:1fr 1fr;gap:20px}
-.card{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:28px;transition:border-color 0.25s;position:relative;overflow:hidden;}
-.card::before{content:'';position:absolute;inset:0;background:radial-gradient(circle at top right,var(--accent-glow) 0%,transparent 60%);opacity:0;transition:opacity 0.4s;pointer-events:none;}
-.card:hover{border-color:var(--border2)}
-.card:hover::before{opacity:1}
-.card-header{display:flex;align-items:center;gap:10px;margin-bottom:24px;}
-.card-icon{width:36px;height:36px;border-radius:10px;background:var(--accent-glow);border:1px solid rgba(59,130,246,0.2);display:flex;align-items:center;justify-content:center;flex-shrink:0;}
-.card-icon svg{width:16px;height:16px;color:var(--accent2);fill:none;stroke:currentColor;stroke-width:2}
-.card-title{font-family:var(--display);font-size:15px;font-weight:600;color:var(--text);letter-spacing:-0.01em}
-.card-sub{font-size:12px;color:var(--text3);margin-top:1px}
-.drop-zone{border:1.5px dashed var(--border2);border-radius:12px;padding:40px 20px;text-align:center;cursor:pointer;transition:border-color 0.2s,background 0.2s;position:relative;overflow:hidden;}
-.drop-zone:hover,.drop-zone.over{border-color:var(--accent);background:var(--accent-glow);}
-.drop-zone input{position:absolute;inset:0;opacity:0;cursor:pointer;width:100%;height:100%}
-.drop-icon{width:48px;height:48px;margin:0 auto 14px;background:var(--bg3);border:1px solid var(--border2);border-radius:12px;display:flex;align-items:center;justify-content:center;}
-.drop-icon svg{width:20px;height:20px;color:var(--accent2);fill:none;stroke:currentColor;stroke-width:1.5}
-.drop-title{font-size:14px;color:var(--text);font-weight:500;margin-bottom:4px}
-.drop-sub{font-size:12px;color:var(--text3)}
-.file-chip{display:none;margin-top:14px;background:var(--bg3);border:1px solid var(--border2);border-radius:10px;padding:10px 14px;align-items:center;gap:12px;}
-.file-chip.show{display:flex}
-.file-chip-icon{width:32px;height:32px;border-radius:8px;background:linear-gradient(135deg,#3b82f6,#6366f1);display:flex;align-items:center;justify-content:center;flex-shrink:0;}
-.file-chip-icon svg{width:14px;height:14px;color:#fff;fill:none;stroke:currentColor;stroke-width:2}
-.file-chip-name{font-size:13px;font-weight:500;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0}
-.file-chip-size{font-size:11px;color:var(--text3);margin-top:1px}
-.btn{width:100%;margin-top:16px;padding:14px;background:linear-gradient(135deg,#3b82f6,#6366f1);color:#fff;border:none;border-radius:10px;font-family:var(--sans);font-size:14px;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px;transition:opacity 0.15s,transform 0.1s;letter-spacing:0.01em;}
-.btn:hover:not(:disabled){opacity:0.9;transform:translateY(-1px)}
-.btn:active:not(:disabled){transform:translateY(0) scale(0.99)}
-.btn:disabled{opacity:0.35;cursor:not-allowed;transform:none}
-.btn.loading .btn-text{display:none}
-.btn.loading .btn-spin{display:flex}
-.btn-spin{display:none;align-items:center;gap:8px}
-.spin{width:16px;height:16px;border:2px solid rgba(255,255,255,0.3);border-top-color:#fff;border-radius:50%;animation:rot 0.7s linear infinite}
-@keyframes rot{to{transform:rotate(360deg)}}
-.result-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:260px;gap:14px;}
-.result-empty-icon{width:56px;height:56px;border-radius:16px;background:var(--bg3);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;}
-.result-empty-icon svg{width:24px;height:24px;color:var(--text3);fill:none;stroke:currentColor;stroke-width:1.5}
-.result-empty p{font-size:13px;color:var(--text3);text-align:center;max-width:180px;line-height:1.6}
+body{font-family:'Outfit',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;display:flex;flex-direction:column;line-height:1.6}
+nav{display:flex;align-items:center;justify-content:space-between;padding:18px 32px;border-bottom:1px solid var(--border);background:rgba(13,15,20,0.95);backdrop-filter:blur(12px);position:sticky;top:0;z-index:100}
+.nav-brand{display:flex;align-items:center;gap:12px}
+.nav-icon{width:38px;height:38px;border-radius:10px;background:linear-gradient(135deg,var(--accent),#a855f7);display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.nav-icon svg{width:20px;height:20px;color:#fff}
+.nav-title{font-family:'Syne',sans-serif;font-weight:700;font-size:1.05rem;color:#fff;line-height:1.2}
+.nav-sub{font-size:0.7rem;color:var(--muted2)}
+.nav-badge{background:linear-gradient(135deg,var(--accent),#a855f7);color:#fff;font-size:0.7rem;font-weight:600;padding:4px 12px;border-radius:20px;letter-spacing:0.03em;font-family:'Syne',sans-serif}
+.hero{text-align:center;padding:56px 24px 40px;background:radial-gradient(ellipse 80% 50% at 50% -10%,rgba(99,102,241,0.15),transparent)}
+.hero-eyebrow{display:inline-flex;align-items:center;gap:8px;background:rgba(99,102,241,0.1);border:1px solid rgba(99,102,241,0.25);color:var(--accent2);font-size:0.75rem;font-weight:600;letter-spacing:0.08em;padding:5px 14px;border-radius:20px;margin-bottom:20px;text-transform:uppercase}
+.hero-eyebrow::before{content:'';width:6px;height:6px;border-radius:50%;background:var(--accent2);animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.3}}
+.hero h1{font-family:'Syne',sans-serif;font-weight:800;font-size:clamp(1.6rem,5vw,2.5rem);line-height:1.15;margin-bottom:14px;background:linear-gradient(135deg,#fff 30%,var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+.hero p{color:var(--muted2);font-size:0.95rem;max-width:480px;margin:0 auto 28px}
+.stats-bar{display:flex;align-items:center;justify-content:center;border:1px solid var(--border);border-radius:12px;overflow:hidden;max-width:480px;margin:0 auto}
+.stat-item{flex:1;padding:12px 8px;text-align:center;border-right:1px solid var(--border)}
+.stat-item:last-child{border-right:none}
+.stat-num{font-family:'Syne',sans-serif;font-weight:700;font-size:1.1rem;color:var(--accent2)}
+.stat-lbl{font-size:0.65rem;color:var(--muted);text-transform:uppercase;letter-spacing:0.06em;margin-top:2px}
+main{flex:1;max-width:900px;width:100%;margin:0 auto;padding:32px 20px 60px;display:flex;flex-direction:column;gap:24px}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden}
+.card-header{display:flex;align-items:center;gap:14px;padding:20px 24px;border-bottom:1px solid var(--border)}
+.card-icon{width:40px;height:40px;border-radius:10px;background:rgba(99,102,241,0.12);color:var(--accent2);display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.card-icon svg{width:20px;height:20px}
+.card-title{font-family:'Syne',sans-serif;font-weight:700;font-size:1rem;color:#fff}
+.card-desc{font-size:0.75rem;color:var(--muted);margin-top:2px}
+.card-body{padding:24px}
+.upload-zone{border:2px dashed var(--border);border-radius:12px;padding:40px 20px;text-align:center;cursor:pointer;transition:all .25s;position:relative}
+.upload-zone:hover,.upload-zone.drag{border-color:var(--accent);background:rgba(99,102,241,0.05)}
+.upload-zone input{position:absolute;inset:0;opacity:0;cursor:pointer;width:100%;height:100%}
+.upload-icon{width:52px;height:52px;border-radius:14px;background:var(--surface2);margin:0 auto 16px;display:flex;align-items:center;justify-content:center}
+.upload-icon svg{width:26px;height:26px;color:var(--muted2)}
+.upload-zone h3{font-family:'Syne',sans-serif;font-weight:600;font-size:0.95rem;color:#fff;margin-bottom:6px}
+.upload-zone p{font-size:0.8rem;color:var(--muted)}
+.upload-formats{display:inline-flex;gap:6px;margin-top:12px}
+.fmt-tag{background:var(--surface2);border:1px solid var(--border);font-size:0.68rem;font-weight:600;letter-spacing:0.05em;padding:3px 8px;border-radius:6px;color:var(--muted2)}
+.file-preview{display:none;align-items:center;gap:16px;background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:14px 18px;margin-top:16px}
+.file-preview.show{display:flex}
+.file-thumb{width:42px;height:42px;border-radius:8px;background:linear-gradient(135deg,var(--accent),#a855f7);display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.file-thumb svg{width:22px;height:22px;color:#fff}
+.file-info{flex:1;min-width:0}
+.file-name{font-weight:600;font-size:0.9rem;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.file-size{font-size:0.75rem;color:var(--muted);margin-top:2px}
+.file-remove{background:none;border:none;color:var(--muted);cursor:pointer;padding:6px;border-radius:6px;transition:all .2s;flex-shrink:0}
+.file-remove:hover{color:var(--fake);background:var(--fake-bg)}
+.file-remove svg{width:16px;height:16px;display:block}
+.analyse-btn{width:100%;margin-top:20px;padding:15px;background:linear-gradient(135deg,var(--accent),#a855f7);border:none;border-radius:10px;color:#fff;font-family:'Syne',sans-serif;font-weight:700;font-size:1rem;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:10px;transition:all .25s;letter-spacing:0.02em}
+.analyse-btn:hover:not(:disabled){filter:brightness(1.1);transform:translateY(-1px);box-shadow:0 8px 24px var(--accent-glow)}
+.analyse-btn:disabled{opacity:0.6;cursor:not-allowed;transform:none}
+.analyse-btn svg{width:18px;height:18px;flex-shrink:0}
+.btn-spinner{width:18px;height:18px;border:2px solid rgba(255,255,255,0.3);border-top-color:#fff;border-radius:50%;animation:spin .8s linear infinite;display:none;flex-shrink:0}
+@keyframes spin{to{transform:rotate(360deg)}}
+.analyse-btn.loading .btn-spinner{display:block}
+.analyse-btn.loading .btn-icon{display:none}
+.status-bar{display:none;align-items:center;gap:10px;padding:10px 16px;border-radius:8px;margin-top:16px;font-size:0.8rem;background:var(--surface2);border:1px solid var(--border)}
+.status-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.status-dot.ok{background:var(--real)}
+.status-dot.warn{background:var(--review);animation:pulse 1.5s infinite}
+.status-dot.spin{background:var(--accent);animation:pulse 1s infinite}
+.status-text{color:var(--muted2)}
+.result-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:48px 20px;text-align:center;gap:12px}
+.result-empty svg{width:48px;height:48px;color:var(--border);margin-bottom:4px}
+.result-empty p{font-size:0.85rem;color:var(--muted);line-height:1.5}
 .result-body{display:none}
 .result-body.show{display:block}
-.result-empty.gone{display:none}
-.verdict-card{border-radius:12px;padding:20px;margin-bottom:20px;border:1px solid transparent;display:flex;align-items:flex-start;gap:16px;}
-.verdict-card.real{background:var(--real-bg);border-color:rgba(16,185,129,0.2)}
-.verdict-card.fake{background:var(--fake-bg);border-color:rgba(239,68,68,0.2)}
-.verdict-card.review{background:var(--review-bg);border-color:rgba(245,158,11,0.2)}
-.verdict-badge{width:40px;height:40px;border-radius:10px;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:18px;}
-.verdict-badge.real{background:rgba(16,185,129,0.15)}
-.verdict-badge.fake{background:rgba(239,68,68,0.15)}
-.verdict-badge.review{background:rgba(245,158,11,0.15)}
-.verdict-title{font-family:var(--display);font-size:20px;font-weight:700;letter-spacing:-0.02em;margin-bottom:3px}
-.verdict-title.real{color:var(--real)}
-.verdict-title.fake{color:var(--fake)}
-.verdict-title.review{color:var(--review)}
-.verdict-desc{font-size:13px;color:var(--text2);line-height:1.5}
+.verdict{display:flex;align-items:center;gap:16px;padding:20px;border-radius:12px;margin-bottom:20px;border:1px solid}
+.verdict.real{background:var(--real-bg);border-color:rgba(16,185,129,0.25)}
+.verdict.fake{background:var(--fake-bg);border-color:rgba(239,68,68,0.25)}
+.verdict.review{background:var(--review-bg);border-color:rgba(245,158,11,0.25)}
+.verdict-emoji{font-size:2rem;flex-shrink:0}
+.verdict-label{font-family:'Syne',sans-serif;font-weight:800;font-size:1.25rem}
+.verdict.real .verdict-label{color:var(--real)}
+.verdict.fake .verdict-label{color:var(--fake)}
+.verdict.review .verdict-label{color:var(--review)}
+.verdict-detail{font-size:0.82rem;color:var(--muted2);margin-top:3px;line-height:1.4}
 .score-section{margin-bottom:20px}
-.score-row{display:flex;justify-content:space-between;font-size:11px;color:var(--text3);margin-bottom:8px;letter-spacing:0.04em;text-transform:uppercase}
-.score-row span:last-child{font-family:'Outfit',monospace;font-weight:500;color:var(--text2)}
-.score-track{height:6px;background:var(--bg3);border-radius:3px;overflow:hidden}
-.score-fill{height:100%;border-radius:3px;width:0%;transition:width 0.7s cubic-bezier(0.16,1,0.3,1)}
-.score-fill.real{background:linear-gradient(90deg,#059669,#10b981)}
-.score-fill.fake{background:linear-gradient(90deg,#dc2626,#ef4444)}
-.score-fill.review{background:linear-gradient(90deg,#d97706,#f59e0b)}
-.mini-stats{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:20px}
-.mini-stat{background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:12px 14px;}
-.mini-stat-val{font-family:var(--display);font-size:17px;font-weight:700;color:var(--text);letter-spacing:-0.02em;margin-bottom:2px}
-.mini-stat-key{font-size:10px;color:var(--text3);letter-spacing:0.05em;text-transform:uppercase}
-.frame-preview{border-radius:10px;overflow:hidden;border:1px solid var(--border);aspect-ratio:16/9;background:var(--bg3);position:relative;}
-.frame-preview img{width:100%;height:100%;object-fit:cover;display:block}
-.frame-tag{position:absolute;bottom:10px;left:10px;font-size:10px;letter-spacing:0.08em;text-transform:uppercase;color:rgba(255,255,255,0.9);background:rgba(0,0,0,0.55);padding:4px 10px;border-radius:6px;backdrop-filter:blur(6px);font-weight:500;}
-.toast{position:fixed;bottom:28px;right:28px;z-index:999;font-size:13px;padding:14px 18px;border-radius:12px;max-width:340px;line-height:1.5;transform:translateY(60px);opacity:0;transition:transform 0.3s,opacity 0.3s;}
-.toast.show{transform:translateY(0);opacity:1}
-.toast.error{background:#150a0a;border:1px solid rgba(239,68,68,0.3);color:#fca5a5;}
-.toast.info{background:#0a1225;border:1px solid rgba(59,130,246,0.3);color:#93c5fd;}
-.toast.warning{background:#150f00;border:1px solid rgba(245,158,11,0.35);color:#fcd34d;}
-footer{position:relative;z-index:1;border-top:1px solid var(--border);padding:24px 48px;display:flex;align-items:center;justify-content:space-between;font-size:12px;color:var(--text3);}
-footer a{color:var(--text3);text-decoration:none;transition:color 0.15s}
-footer a:hover{color:var(--accent2)}
-.fade-up{animation:fadeUp 0.5s ease both}
-.fade-up-2{animation:fadeUp 0.5s 0.1s ease both}
-.fade-up-3{animation:fadeUp 0.5s 0.2s ease both}
-@keyframes fadeUp{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:translateY(0)}}
-@media(max-width:720px){
-  .two-col{grid-template-columns:1fr}
-  .stats-bar{grid-template-columns:1fr 1fr}
-  .stat-cell:nth-child(2){border-right:none}
-  .stat-cell:nth-child(3){border-top:1px solid var(--border)}
-  nav{padding:0 20px}
-  .hero,.section{padding-left:20px;padding-right:20px}
-  .hero{padding-top:48px;padding-bottom:36px}
-  footer{padding:20px;flex-direction:column;gap:8px;text-align:center}
+.score-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+.score-label{font-size:0.78rem;color:var(--muted2)}
+.score-value{font-family:'Syne',sans-serif;font-weight:700;font-size:0.95rem}
+.score-track{height:8px;background:var(--surface2);border-radius:99px;overflow:hidden;border:1px solid var(--border)}
+.score-fill{height:100%;border-radius:99px;transition:width .8s cubic-bezier(.4,0,.2,1);background:linear-gradient(90deg,var(--real),var(--fake))}
+.mini-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:20px}
+.mini-stat{background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:14px;text-align:center}
+.mini-val{font-family:'Syne',sans-serif;font-weight:700;font-size:1.1rem;color:var(--accent2)}
+.mini-key{font-size:0.68rem;color:var(--muted);text-transform:uppercase;letter-spacing:0.07em;margin-top:3px}
+.frame-box{border:1px solid var(--border);border-radius:10px;overflow:hidden;display:none}
+.frame-box.show{display:block}
+.frame-box img{width:100%;display:block;max-height:220px;object-fit:cover}
+.frame-caption{padding:8px 14px;font-size:0.72rem;color:var(--muted);background:var(--surface2);border-top:1px solid var(--border)}
+.toast{position:fixed;bottom:28px;left:50%;transform:translateX(-50%) translateY(20px);background:#1e2130;border:1px solid var(--border);border-radius:10px;padding:12px 20px;font-size:0.83rem;color:var(--text);box-shadow:0 8px 32px rgba(0,0,0,0.4);opacity:0;transition:all .3s;pointer-events:none;max-width:calc(100vw - 40px);text-align:center;z-index:999}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+.toast.error{border-color:rgba(239,68,68,0.4);background:#1c1016}
+.toast.warning{border-color:rgba(245,158,11,0.4);background:#1c1a0d}
+footer{border-top:1px solid var(--border);padding:20px 32px;display:flex;align-items:center;justify-content:space-between;font-size:0.78rem;color:var(--muted);flex-wrap:wrap;gap:8px}
+footer a{color:var(--accent2);text-decoration:none}
+footer a:hover{text-decoration:underline}
+@media(max-width:600px){
+  nav{padding:14px 16px}
+  .hero{padding:36px 16px 28px}
+  .stats-bar{flex-direction:column;max-width:260px}
+  .stat-item{border-right:none;border-bottom:1px solid var(--border)}
+  .stat-item:last-child{border-bottom:none}
+  main{padding:20px 12px 48px}
+  .card-body{padding:16px}
+  footer{flex-direction:column;text-align:center;padding:16px}
 }
 </style>
 </head>
 <body>
 
 <nav>
-  <a class="nav-brand" href="#">
-    <div class="nav-brand-dot">
-      <svg viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z"/></svg>
+  <div class="nav-brand">
+    <div class="nav-icon">
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z"/>
+      </svg>
     </div>
-    Deepfake Video Detection System
-  </a>
-  <span class="nav-badge">B.Sc. Final Year Project</span>
+    <div>
+      <div class="nav-title">Deepfake Video Detection System</div>
+      <div class="nav-sub">Vision Transformer · AI-Powered Analysis</div>
+    </div>
+  </div>
+  <div class="nav-badge">B.Sc. Final Year Project</div>
 </nav>
 
-<div class="hero fade-up">
-  <div class="hero-eyebrow">
-    <span></span>
-    Vision Transformer &nbsp;&middot;&nbsp; Celeb-DF v2 &nbsp;&middot;&nbsp; F1-Score 91.7%
-  </div>
-  <h1>Detect <span class="blue">deepfake videos</span><br/>with AI precision</h1>
-  <p>Upload any video to determine whether it is authentic or AI-generated. Powered by a Vision Transformer model, evaluated on the Celeb-DF v2 benchmark.</p>
-</div>
-
-<div class="stats-bar fade-up-2">
-  <div class="stat-cell">
-    <div class="stat-num">85.8<span class="pct">%</span></div>
-    <div class="stat-lbl">Accuracy</div>
-  </div>
-  <div class="stat-cell">
-    <div class="stat-num">87.4<span class="pct">%</span></div>
-    <div class="stat-lbl">Precision</div>
-  </div>
-  <div class="stat-cell">
-    <div class="stat-num">96.5<span class="pct">%</span></div>
-    <div class="stat-lbl">Recall</div>
-  </div>
-  <div class="stat-cell">
-    <div class="stat-num">91.7<span class="pct">%</span></div>
-    <div class="stat-lbl">F1-Score</div>
+<div class="hero">
+  <div class="hero-eyebrow">AI-Powered · ViT Model · Real-Time</div>
+  <h1>Detect Deepfake Videos<br/>Instantly &amp; Accurately</h1>
+  <p>Upload any MP4, AVI, or MOV video. Our Vision Transformer model analyses frames and classifies authenticity in seconds.</p>
+  <div class="stats-bar">
+    <div class="stat-item"><div class="stat-num">91.74%</div><div class="stat-lbl">F1-Score</div></div>
+    <div class="stat-item"><div class="stat-num">96.53%</div><div class="stat-lbl">Recall</div></div>
+    <div class="stat-item"><div class="stat-num">85.80%</div><div class="stat-lbl">Accuracy</div></div>
+    <div class="stat-item"><div class="stat-num">&lt;30s</div><div class="stat-lbl">Per Video</div></div>
   </div>
 </div>
 
-<div class="section fade-up-3">
-  <div class="two-col">
+<main>
 
-    <div class="card">
-      <div class="card-header">
-        <div class="card-icon">
-          <svg viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"/></svg>
-        </div>
-        <div>
-          <div class="card-title">Upload Video</div>
-          <div class="card-sub">MP4, AVI or MOV format</div>
-        </div>
+  <div class="card">
+    <div class="card-header">
+      <div class="card-icon">
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"/>
+        </svg>
       </div>
-      <div class="drop-zone" id="dropZone">
-        <input type="file" id="fileInput" accept="video/mp4,video/avi,video/quicktime,.mov"/>
-        <div class="drop-icon">
-          <svg viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 10.5l4.72-4.72a.75.75 0 011.28.53v11.38a.75.75 0 01-1.28.53l-4.72-4.72M4.5 18.75h9a2.25 2.25 0 002.25-2.25v-9a2.25 2.25 0 00-2.25-2.25h-9A2.25 2.25 0 002.25 7.5v9a2.25 2.25 0 002.25 2.25z"/></svg>
-        </div>
-        <div class="drop-title">Drop video here or click to browse</div>
-        <div class="drop-sub">Supports MP4 &middot; AVI &middot; MOV</div>
+      <div>
+        <div class="card-title">Upload Video</div>
+        <div class="card-desc">Drag &amp; drop or click to select · Supports MP4 · AVI · MOV</div>
       </div>
-      <div class="file-chip" id="fileChip">
-        <div class="file-chip-icon">
-          <svg viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5.25 5.653c0-.856.917-1.398 1.667-.986l11.54 6.347a1.125 1.125 0 010 1.972l-11.54 6.347a1.125 1.125 0 01-1.667-.986V5.653z"/></svg>
-        </div>
-        <div>
-          <div class="file-chip-name" id="chipName">—</div>
-          <div class="file-chip-size" id="chipSize">—</div>
-        </div>
-      </div>
-      <button class="btn" id="analyseBtn" disabled>
-        <span class="btn-text">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-          Analyse Video
-        </span>
-        <span class="btn-spin">
-          <div class="spin"></div>
-          <span id="btnSpinMsg">Analysing video&hellip;</span>
-        </span>
-      </button>
     </div>
-
-    <div class="card">
-      <div class="card-header">
-        <div class="card-icon">
-          <svg viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+    <div class="card-body">
+      <div class="upload-zone" id="uploadZone">
+        <input type="file" accept="video/mp4,video/avi,video/quicktime,.mp4,.avi,.mov" id="fileInput"/>
+        <div class="upload-icon">
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 10.5l4.72-4.72a.75.75 0 011.28.53v11.38a.75.75 0 01-1.28.53l-4.72-4.72M4.5 18.75h9a2.25 2.25 0 002.25-2.25v-9a2.25 2.25 0 00-2.25-2.25h-9A2.25 2.25 0 002.25 7.5v9a2.25 2.25 0 002.25 2.25z"/>
+          </svg>
         </div>
-        <div>
-          <div class="card-title">Detection Result</div>
-          <div class="card-sub">AI-powered analysis</div>
+        <h3>Drop your video here</h3>
+        <p>Or click anywhere to browse files</p>
+        <div class="upload-formats">
+          <span class="fmt-tag">MP4</span>
+          <span class="fmt-tag">AVI</span>
+          <span class="fmt-tag">MOV</span>
         </div>
       </div>
-      <div class="result-empty" id="resultEmpty">
-        <div class="result-empty-icon">
-          <svg viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z"/></svg>
+
+      <div class="file-preview" id="filePreview">
+        <div class="file-thumb">
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M5.25 5.653c0-.856.917-1.398 1.667-.986l11.54 6.348a1.125 1.125 0 010 1.971l-11.54 6.347a1.125 1.125 0 01-1.667-.985V5.653z"/>
+          </svg>
         </div>
-        <p>Upload a video and click Analyse to begin</p>
+        <div class="file-info">
+          <div class="file-name" id="fileName">—</div>
+          <div class="file-size" id="fileSize">—</div>
+        </div>
+        <button class="file-remove" id="removeBtn" title="Remove file">
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/>
+          </svg>
+        </button>
+      </div>
+
+      <button class="analyse-btn" id="analyseBtn" disabled>
+        <div class="btn-spinner"></div>
+        <svg class="btn-icon" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z"/>
+        </svg>
+        <span id="btnText">Analyse Video</span>
+      </button>
+
+      <div class="status-bar" id="statusBar">
+        <div class="status-dot" id="statusDot"></div>
+        <span class="status-text" id="statusText"></span>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header">
+      <div class="card-icon">
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+        </svg>
+      </div>
+      <div>
+        <div class="card-title">Detection Result</div>
+        <div class="card-desc">AI-powered analysis</div>
+      </div>
+    </div>
+    <div class="card-body">
+      <div class="result-empty" id="resultEmpty">
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z"/>
+        </svg>
+        <p>Upload a video and click<br/><strong>Analyse Video</strong> to begin</p>
       </div>
       <div class="result-body" id="resultBody">
-        <div class="verdict-card" id="verdictCard">
-          <div class="verdict-badge" id="verdictBadge"></div>
+        <div class="verdict" id="verdictBox">
+          <div class="verdict-emoji" id="verdictEmoji"></div>
           <div>
-            <div class="verdict-title" id="verdictTitle"></div>
-            <div class="verdict-desc" id="verdictDesc"></div>
+            <div class="verdict-label" id="verdictLabel"></div>
+            <div class="verdict-detail" id="verdictDetail"></div>
           </div>
         </div>
         <div class="score-section">
-          <div class="score-row">
-            <span>Real &larr; Confidence &rarr; Fake</span>
-            <span id="scoreVal">—</span>
+          <div class="score-header">
+            <span class="score-label">Real ← Confidence → Fake</span>
+            <span class="score-value" id="scoreVal">—</span>
           </div>
-          <div class="score-track">
-            <div class="score-fill" id="scoreFill"></div>
-          </div>
+          <div class="score-track"><div class="score-fill" id="scoreFill" style="width:0%"></div></div>
         </div>
         <div class="mini-stats">
-          <div class="mini-stat">
-            <div class="mini-stat-val" id="ms1">—</div>
-            <div class="mini-stat-key">P(Fake)</div>
-          </div>
-          <div class="mini-stat">
-            <div class="mini-stat-val" id="ms2">—</div>
-            <div class="mini-stat-key">Frames</div>
-          </div>
-          <div class="mini-stat">
-            <div class="mini-stat-val" id="ms3">—</div>
-            <div class="mini-stat-key">Time</div>
-          </div>
+          <div class="mini-stat"><div class="mini-val" id="ms1">—</div><div class="mini-key">P(Fake)</div></div>
+          <div class="mini-stat"><div class="mini-val" id="ms2">—</div><div class="mini-key">Frames</div></div>
+          <div class="mini-stat"><div class="mini-val" id="ms3">—</div><div class="mini-key">Time</div></div>
         </div>
-        <div class="frame-preview" id="framePrev" style="display:none">
-          <img id="frameImg" src="" alt="Sample frame"/>
-          <div class="frame-tag">Sample frame</div>
+        <div class="frame-box" id="frameBox">
+          <img id="frameImg" src="" alt="Sample frame extracted from video"/>
+          <div class="frame-caption">Sample frame extracted from the video</div>
         </div>
       </div>
     </div>
-
   </div>
-</div>
+
+</main>
 
 <footer>
-  <span>Deepfake Video Detection System &mdash; B.Sc. Computer Science</span>
-  <a href="https://huggingface.co/spaces/workklic/deepfake-video-detector" target="_blank">Powered by Hugging Face Spaces &nearr;</a>
+  <span>Deepfake Video Detection System &mdash; B.Sc. Computer Science Final Year Project</span>
+  <a href="https://huggingface.co/spaces/workklic/deepfake-video-detector" target="_blank" rel="noopener">Powered by Hugging Face Spaces ↗</a>
 </footer>
 
 <div class="toast" id="toast"></div>
 
+<script>
+// ─────────────────────────────────────────────────────────────────
+//  CONFIG
+// ─────────────────────────────────────────────────────────────────
+const SPACE   = "https://workklic-deepfake-video-detector.hf.space";
+const THR     = 0.05;
+
+// ─────────────────────────────────────────────────────────────────
+//  STATE  — selectedFile is the ONLY source of truth for the file
+// ─────────────────────────────────────────────────────────────────
+let selectedFile = null;
+let toastTimer   = null;
+
+// ─────────────────────────────────────────────────────────────────
+//  HELPERS
+// ─────────────────────────────────────────────────────────────────
+const el  = id => document.getElementById(id);
+const fmtBytes = b => b < 1048576 ? (b/1024).toFixed(1)+' KB' : (b/1048576).toFixed(2)+' MB';
+
+// ─────────────────────────────────────────────────────────────────
+//  FILE SELECTION
+// ─────────────────────────────────────────────────────────────────
+el('fileInput').addEventListener('change', function() {
+  if (this.files && this.files.length > 0) {
+    setFile(this.files[0]);
+  }
+});
+
+const zone = el('uploadZone');
+zone.addEventListener('dragover', function(e) { e.preventDefault(); this.classList.add('drag'); });
+zone.addEventListener('dragleave', function() { this.classList.remove('drag'); });
+zone.addEventListener('drop', function(e) {
+  e.preventDefault();
+  this.classList.remove('drag');
+  if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+    var f = e.dataTransfer.files[0];
+    if (/video\/(mp4|avi|quicktime|x-msvideo)/i.test(f.type) || /\.(mp4|avi|mov)$/i.test(f.name)) {
+      setFile(f);
+    } else {
+      showToast('Please drop a video file (MP4, AVI, or MOV)', 'error');
+    }
+  }
+});
+
+el('removeBtn').addEventListener('click', clearFile);
+
+function setFile(f) {
+  selectedFile = f;
+  el('fileName').textContent = f.name;
+  el('fileSize').textContent = fmtBytes(f.size);
+  el('filePreview').classList.add('show');
+  el('analyseBtn').disabled = false;
+  resetResult();
+  hideToast();
+}
+
+function clearFile() {
+  selectedFile = null;
+  el('fileInput').value = '';
+  el('filePreview').classList.remove('show');
+  el('analyseBtn').disabled = true;
+  resetResult();
+  hideStatus();
+  hideToast();
+}
+
+function resetResult() {
+  el('resultEmpty').style.display = '';
+  el('resultBody').classList.remove('show');
+  el('frameBox').classList.remove('show');
+}
+
+// ─────────────────────────────────────────────────────────────────
+//  STATUS BAR
+// ─────────────────────────────────────────────────────────────────
+function showStatus(text, type) {
+  el('statusBar').style.display = 'flex';
+  el('statusText').textContent  = text;
+  el('statusDot').className     = 'status-dot ' + (type || 'spin');
+}
+function hideStatus() {
+  el('statusBar').style.display = 'none';
+}
+
+// ─────────────────────────────────────────────────────────────────
+//  TOAST
+// ─────────────────────────────────────────────────────────────────
+function showToast(msg, type) {
+  var t = el('toast');
+  t.textContent = msg;
+  t.className   = 'toast ' + (type || 'error') + ' show';
+  if (toastTimer) clearTimeout(toastTimer);
+  if (type !== 'info') toastTimer = setTimeout(function(){ t.classList.remove('show'); }, 8000);
+}
+function hideToast() {
+  if (toastTimer) clearTimeout(toastTimer);
+  el('toast').classList.remove('show');
+}
+
+// ─────────────────────────────────────────────────────────────────
+//  SHOW RESULT
+// ─────────────────────────────────────────────────────────────────
+function showResult(prob, frames, ms, imgUrl) {
+  var box   = el('verdictBox');
+  box.className = 'verdict';
+
+  if (prob >= THR) {
+    box.classList.add('fake');
+    el('verdictEmoji').textContent  = '❌';
+    el('verdictLabel').textContent  = 'FAKE — Deepfake Detected';
+    el('verdictDetail').textContent = 'This video shows signs of AI manipulation. The P(Fake) score exceeds the detection threshold of ' + THR + '.';
+  } else {
+    box.classList.add('real');
+    el('verdictEmoji').textContent  = '✅';
+    el('verdictLabel').textContent  = 'REAL — Authentic Video';
+    el('verdictDetail').textContent = 'No deepfake manipulation detected. The P(Fake) score is below the classification threshold.';
+  }
+
+  var pct = Math.min(100, Math.round(prob * 100));
+  el('scoreFill').style.width = pct + '%';
+  el('scoreVal').textContent  = (prob * 100).toFixed(2) + '%';
+  el('ms1').textContent       = prob.toFixed(4);
+  el('ms2').textContent       = frames || '10';
+  el('ms3').textContent       = ms ? (ms / 1000).toFixed(1) + 's' : '—';
+
+  if (imgUrl) {
+    el('frameImg').src = imgUrl;
+    el('frameBox').classList.add('show');
+  }
+
+  el('resultEmpty').style.display = 'none';
+  el('resultBody').classList.add('show');
+}
+
+// ─────────────────────────────────────────────────────────────────
+//  ANALYSE  — direct Gradio REST API (no CDN dependency)
+// ─────────────────────────────────────────────────────────────────
+el('analyseBtn').addEventListener('click', async function() {
+  // Guard: must have a file
+  if (!selectedFile) {
+    showToast('Please select a video file first.', 'error');
+    return;
+  }
+
+  var btn = el('analyseBtn');
+  btn.disabled = true;
+  btn.classList.add('loading');
+  el('btnText').textContent = 'Uploading video…';
+  resetResult();
+  hideToast();
+
+  var t0 = Date.now();
+
+  try {
+    // ── STEP 1: Upload ──────────────────────────────────────────
+    showStatus('Uploading video to AI model…', 'spin');
+
+    var formData = new FormData();
+    formData.append('files', selectedFile, selectedFile.name);
+
+    var uploadRes = await fetch(SPACE + '/upload', {
+      method: 'POST',
+      body: formData
+    });
+
+    if (!uploadRes.ok) {
+      var statusCode = uploadRes.status;
+      if (statusCode === 0 || statusCode >= 500) {
+        throw new Error('The AI model is starting up. Please wait 30 seconds and try again.');
+      }
+      throw new Error('Upload failed (' + statusCode + '). Please try again.');
+    }
+
+    var uploadData = await uploadRes.json();
+
+    // uploadData should be an array of file path strings
+    if (!uploadData || !Array.isArray(uploadData) || uploadData.length === 0) {
+      throw new Error('Upload response was empty. Please try again.');
+    }
+
+    var filePath = uploadData[0];
+
+    // ── STEP 2: Predict ─────────────────────────────────────────
+    el('btnText').textContent = 'Analysing frames…';
+    showStatus('Running Vision Transformer inference…', 'spin');
+
+    // Build the data payload — Gradio expects a file object
+    var predictBody = {
+      data: [
+        {
+          name: selectedFile.name,
+          data: null,
+          is_file: true,
+          orig_name: selectedFile.name,
+          tmp_name: filePath
+        }
+      ]
+    };
+
+    var predRes = await fetch(SPACE + '/run/predict', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(predictBody)
+    });
+
+    if (!predRes.ok) {
+      throw new Error('Analysis request failed (' + predRes.status + '). Please try again.');
+    }
+
+    var predJson = await predRes.json();
+
+    if (!predJson || !predJson.data || predJson.data.length < 2) {
+      throw new Error('Unexpected response from AI model. Please try again.');
+    }
+
+    var data  = predJson.data;
+    var prob  = 0;
+    var imgUrl = null;
+
+    // data[0] = result text string
+    // data[1] = probability (number or string)
+    // data[2] = sample frame image (optional, various formats)
+    if (typeof data[1] === 'number') {
+      prob = data[1];
+    } else if (typeof data[1] === 'string') {
+      prob = parseFloat(data[1]) || 0;
+    }
+
+    if (data[2]) {
+      if (typeof data[2] === 'string' && data[2].startsWith('http')) {
+        imgUrl = data[2];
+      } else if (data[2].url) {
+        imgUrl = data[2].url;
+      } else if (data[2].path) {
+        imgUrl = SPACE + '/file=' + data[2].path;
+      } else if (data[2].name) {
+        imgUrl = SPACE + '/file=' + data[2].name;
+      }
+    }
+
+    showResult(prob, 10, Date.now() - t0, imgUrl);
+    showStatus('Analysis complete', 'ok');
+    hideToast();
+
+  } catch (err) {
+    console.error('Analyse error:', err);
+    var msg = (err && err.message) ? err.message : 'Something went wrong. Please try again.';
+
+    if (msg.includes('Failed to fetch') || msg.includes('NetworkError') || msg.includes('Load failed')) {
+      showToast('Connection error — the AI model may be sleeping. Wait 30 seconds and try again.', 'warning');
+      showStatus('Connection failed — AI model may be starting up', 'warn');
+    } else {
+      showToast(msg, 'error');
+      hideStatus();
+    }
+  } finally {
+    btn.classList.remove('loading');
+    btn.disabled = (selectedFile === null);
+    el('btnText').textContent = 'Analyse Video';
+  }
+});
+</script>
 </body>
 </html>
